@@ -1,0 +1,22 @@
+{
+  "name": "new-ytdownloader",
+  "version": "1.0.0",
+  "bin": {
+    "ytdownloader": "YTDownload.js"
+  },
+  "scripts": {
+    "start": "node YTDownload.js",
+    "build": "pkg . --targets node18-win-x64 --output YTDownload.exe"
+  },
+  "pkg": {
+    "assets": [
+      "yt-dlp.exe",
+      "ffmpeg-6.0-essentials_build/**/*"
+    ],
+    "scripts": []
+  },
+  "dependencies": {
+    "inquirer": "^8.2.6",
+    "semver":    "^7.3.8"
+  }
+}
