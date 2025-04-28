@@ -16,7 +16,6 @@
     "scripts": []
   },
   "dependencies": {
-    "inquirer": "^8.2.6",
-    "semver":    "^7.3.8"
+    "inquirer": "^8.2.6"
   }
 }
