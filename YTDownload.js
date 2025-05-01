@@ -5,9 +5,10 @@ const path      = require('path');
 const os        = require('os');
 const https     = require('https');
 const inquirer  = require('inquirer');
-const { spawn, spawnSync } = require('child_process');
+const ProgressBar = require('progress');
+const { spawn } = require('child_process');
 
-const CURRENT_VERSION = '1.5.0';
+const CURRENT_VERSION = '1.6.0';
 const UPDATE_INFO_URL = 'https://api.github.com/repos/NotJoeyBlack/NotJoeyBlack-YTDownloader/releases/latest';
 
 function waitForKeypress() {
@@ -35,7 +36,10 @@ function fetchJson(url) {
       if (r.statusCode !== 200) return rej(new Error(`HTTP ${r.statusCode}`));
       let body = '';
       r.on('data', d => body += d);
-      r.on('end', () => { try { res(JSON.parse(body)); } catch (e) { rej(e); } });
+      r.on('end', () => {
+        try { res(JSON.parse(body)); }
+        catch (e) { rej(e); }
+      });
     }).on('error', rej);
   });
 }
@@ -44,13 +48,35 @@ function downloadFile(url, dest) {
   return new Promise((res, rej) => {
     const file = fs.createWriteStream(dest);
     https.get(url, r => {
+      // handle redirects
       if (r.statusCode >= 300 && r.statusCode < 400 && r.headers.location) {
         file.close();
         return downloadFile(r.headers.location, dest).then(res).catch(rej);
       }
-      if (r.statusCode !== 200) return rej(new Error(`HTTP ${r.statusCode}`));
+      if (r.statusCode !== 200) {
+        return rej(new Error(`HTTP ${r.statusCode}`));
+      }
+
+      // setup progress bar
+      const total = parseInt(r.headers['content-length'], 10);
+      let bar = null;
+      if (!isNaN(total)) {
+        bar = new ProgressBar('  downloading [:bar] :percent :etas', {
+          total,
+          width: 40,
+          complete: '=',
+          incomplete: ' '
+        });
+      }
+
+      r.on('data', chunk => {
+        if (bar) bar.tick(chunk.length);
+      });
+
       r.pipe(file);
-      file.on('finish', () => { file.close(res); });
+      file.on('finish', () => {
+        file.close(res);
+      });
     }).on('error', err => {
       try { fs.unlinkSync(dest); } catch {}
       rej(err);
@@ -64,16 +90,37 @@ async function checkForUpdates() {
     const info = await fetchJson(UPDATE_INFO_URL);
     const latestTag = info.tag_name.replace(/^v/, '');
     console.log(`[Update] Latest release: v${latestTag}`);
+
     if (isNewer(latestTag, CURRENT_VERSION)) {
       console.log(`⬆️  New version v${latestTag} available!`);
       const asset = info.assets.find(a => a.name.endsWith('.exe'));
       if (!asset) throw new Error('No installer asset found');
+
       const tmp = path.join(os.tmpdir(), asset.name);
       console.log('[Update] Downloading installer…');
       await downloadFile(asset.browser_download_url, tmp);
-      console.log('[Update] Launching installer…');
-      spawn(tmp, ['/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART'], { detached: true, stdio: 'ignore' }).unref();
-      process.exit(0);
+
+      console.log('\n[Update] Launching installer…');
+      // spawn installer and wait for it to complete
+      const installer = spawn(tmp, ['/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART'], {
+        stdio: 'inherit'
+      });
+
+      installer.on('close', code => {
+        if (code === 0) {
+          console.log('[Update] Installation complete. Restarting application…');
+          // Relaunch this script
+          const nodeExe = process.argv[0];
+          const scriptPath = process.argv[1];
+          spawn(nodeExe, [scriptPath], {
+            detached: true,
+            stdio: 'ignore'
+          }).unref();
+        } else {
+          console.warn(`[Update] Installer exited with code ${code}`);
+        }
+        process.exit(0);
+      });
     } else {
       console.log('[Update] Already on latest version.');
     }
@@ -93,7 +140,10 @@ async function checkForUpdates() {
   }
 
   const ffFolder  = path.join(exeDir, 'ffmpeg-6.0-essentials_build');
-  const ffCands   = [path.join(ffFolder, 'bin', 'ffmpeg.exe'), path.join(ffFolder, 'ffmpeg.exe')];
+  const ffCands   = [
+    path.join(ffFolder, 'bin', 'ffmpeg.exe'),
+    path.join(ffFolder, 'ffmpeg.exe')
+  ];
   const found     = ffCands.find(p => fs.existsSync(p));
   const ffmpegLoc = found && path.dirname(found);
   if (!ffmpegLoc) {
@@ -102,31 +152,48 @@ async function checkForUpdates() {
   }
 
   const downloadDir = path.join(os.homedir(), 'Downloads');
-  if (!fs.existsSync(downloadDir)) fs.mkdirSync(downloadDir, { recursive: true });
+  if (!fs.existsSync(downloadDir)) {
+    fs.mkdirSync(downloadDir, { recursive: true });
+  }
 
   // 1) Prompt for URL & format
   const { url, choice } = await inquirer.prompt([
-    { type: 'input', name: 'url', message: 'YouTube video URL:', validate: v => /^https?:\/\/(www\.)?youtube\.com/.test(v) || 'Invalid URL' },
-    { type: 'list',  name: 'choice', message: 'Format:', choices: [
-        { name: 'Video + Audio (MP4, highest-quality H.264)', value: 'v+a' },
-        { name: 'Audio only',                         value: 'audio' }
-      ] }
+    {
+      type: 'input',
+      name: 'url',
+      message: 'YouTube video URL:',
+      validate: v => /^https?:\/\/(www\.)?youtube\.com/.test(v) || 'Invalid URL'
+    },
+    {
+      type: 'list',
+      name: 'choice',
+      message: 'Format:',
+      choices: [
+        {
+          name: 'Video + Audio (MP4, highest-quality H.264)',
+          value: 'v+a'
+        },
+        {
+          name: 'Audio only',
+          value: 'audio'
+        }
+      ]
+    }
   ]);
 
-  // 2) Force highest-quality MP4‐wrapped H.264 + best M4A, with an MP4 fallback,
-  //    then remux into a single .mp4 container.
+  // 2) Force highest-quality MP4‐wrapped H.264 + best M4A, with MP4 fallback
   const fmt = choice === 'v+a'
     ? 'bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/best[ext=mp4]'
     : 'bestaudio[ext=m4a]';
   const mergeArgs = [];
   if (choice === 'v+a') {
     mergeArgs.push('--merge-output-format','mp4');
-    // ensure proper mp4 container even on fallback
     mergeArgs.push('--remux-video','mp4');
   }
 
   const args = [
-    '--no-mtime', '--restrict-filenames',
+    '--no-mtime',
+    '--restrict-filenames',
     '-f', fmt,
     ...mergeArgs,
     '--ffmpeg-location', ffmpegLoc,
@@ -142,7 +209,11 @@ async function checkForUpdates() {
     waitForKeypress();
   });
   dl.on('close', code => {
-    console.log(code === 0 ? '\n✅ Download complete!' : `\n❌ yt-dlp exited with code ${code}`);
+    console.log(
+      code === 0
+        ? '\n✅ Download complete!'
+        : `\n❌ yt-dlp exited with code ${code}`
+    );
     spawn('explorer', [downloadDir], { shell: true });
     waitForKeypress();
   });
