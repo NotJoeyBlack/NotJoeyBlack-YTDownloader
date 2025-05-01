@@ -1,7 +1,7 @@
 ; -- YTDownloader.iss --
 [Setup]
 AppName=YT Downloader
-AppVersion=1.0
+AppVersion=1.6.0
 DefaultDirName={pf}\YT Downloader
 DefaultGroupName=YT Downloader
 OutputDir=.
