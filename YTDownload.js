@@ -4,16 +4,11 @@ const fs        = require('fs');
 const path      = require('path');
 const os        = require('os');
 const https     = require('https');
-const semver    = require('semver');
 const inquirer  = require('inquirer');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 
-const CURRENT_VERSION = '1.0.0';  // ← bump this on each release, matching your Git tag
-const GITHUB_API_LATEST = 'https://api.github.com/repos/YOUR_GITHUB_USERNAME/YOUR_REPO/releases/latest';
-// If you hit rate-limits, set a GITHUB_TOKEN env var and add an Authorization header below.
-
-const LAST_CHECK_DIR  = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'YTDownloader');
-const LAST_CHECK_FILE = path.join(LAST_CHECK_DIR, 'last_check.txt');
+const CURRENT_VERSION = '1.5.0';
+const UPDATE_INFO_URL = 'https://api.github.com/repos/NotJoeyBlack/NotJoeyBlack-YTDownloader/releases/latest';
 
 function waitForKeypress() {
   console.log('\nPress any key to exit...');
@@ -22,141 +17,133 @@ function waitForKeypress() {
   process.stdin.on('data', () => process.exit(0));
 }
 
-function shouldCheckForUpdate() {
-  try {
-    if (!fs.existsSync(LAST_CHECK_FILE)) return true;
-    const last = Number(fs.readFileSync(LAST_CHECK_FILE, 'utf8'));
-    return Date.now() - last > 24 * 60 * 60 * 1000;
-  } catch {
-    return true;
+function isNewer(latest, current) {
+  const a = latest.split('.').map(n => parseInt(n,10) || 0);
+  const b = current.split('.').map(n => parseInt(n,10) || 0);
+  for (let i = 0; i < 3; i++) {
+    if (a[i] > b[i]) return true;
+    if (a[i] < b[i]) return false;
   }
-}
-
-function markChecked() {
-  try {
-    if (!fs.existsSync(LAST_CHECK_DIR)) fs.mkdirSync(LAST_CHECK_DIR, { recursive: true });
-    fs.writeFileSync(LAST_CHECK_FILE, String(Date.now()));
-  } catch {}
+  return false;
 }
 
 function fetchJson(url) {
-  return new Promise((resolve, reject) => {
-    const opts = {
-      headers: {
-        'User-Agent': 'YTDownloader-Updater',
-        'Accept': 'application/vnd.github.v3+json',
-        // ...(process.env.GITHUB_TOKEN && { 'Authorization': `token ${process.env.GITHUB_TOKEN}` })
-      }
-    };
-    https.get(url, opts, res => {
-      if (res.statusCode !== 200) {
-        return reject(new Error(`Status ${res.statusCode}`));
-      }
-      let data = '';
-      res.on('data', d => data += d);
-      res.on('end', () => {
-        try { resolve(JSON.parse(data)); }
-        catch (err) { reject(err); }
-      });
-    }).on('error', reject);
+  return new Promise((res, rej) => {
+    https.get(url, {
+      headers: { 'User-Agent': 'YTDownloader-Updater', 'Accept': 'application/vnd.github.v3+json' }
+    }, r => {
+      if (r.statusCode !== 200) return rej(new Error(`HTTP ${r.statusCode}`));
+      let body = '';
+      r.on('data', d => body += d);
+      r.on('end', () => { try { res(JSON.parse(body)); } catch (e) { rej(e); } });
+    }).on('error', rej);
   });
 }
 
-async function checkForUpdates() {
-  if (!shouldCheckForUpdate()) return;
-  try {
-    const info = await fetchJson(GITHUB_API_LATEST);
-    const latestTag = info.tag_name.replace(/^v/, '');
-    if (semver.gt(latestTag, CURRENT_VERSION)) {
-      console.log(`⬆️  New version ${latestTag} available!`);
-      const asset = info.assets.find(a => a.name.endsWith('Setup.exe'));
-      if (asset) {
-        const tmp = path.join(os.tmpdir(), asset.name);
-        console.log('⏬ Downloading installer…');
-        await downloadFile(asset.browser_download_url, tmp);
-        console.log('▶️  Launching silent installer and exiting…');
-        spawn(tmp, ['/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART'], { detached: true, stdio: 'ignore' }).unref();
-        process.exit(0);
-      }
-    }
-  } catch (err) {
-    console.warn('Update check failed:', err.message);
-  } finally {
-    markChecked();
-  }
-}
-
 function downloadFile(url, dest) {
-  return new Promise((resolve, reject) => {
+  return new Promise((res, rej) => {
     const file = fs.createWriteStream(dest);
-    https.get(url, res => {
-      if (res.statusCode !== 200) {
-        return reject(new Error(`Status ${res.statusCode}`));
+    https.get(url, r => {
+      if (r.statusCode >= 300 && r.statusCode < 400 && r.headers.location) {
+        file.close();
+        return downloadFile(r.headers.location, dest).then(res).catch(rej);
       }
-      res.pipe(file);
-      file.on('finish', () => file.close(resolve));
+      if (r.statusCode !== 200) return rej(new Error(`HTTP ${r.statusCode}`));
+      r.pipe(file);
+      file.on('finish', () => { file.close(res); });
     }).on('error', err => {
-      fs.unlinkSync(dest);
-      reject(err);
+      try { fs.unlinkSync(dest); } catch {}
+      rej(err);
     });
   });
 }
 
+async function checkForUpdates() {
+  console.log('\n[Update] Checking for updates…');
+  try {
+    const info = await fetchJson(UPDATE_INFO_URL);
+    const latestTag = info.tag_name.replace(/^v/, '');
+    console.log(`[Update] Latest release: v${latestTag}`);
+    if (isNewer(latestTag, CURRENT_VERSION)) {
+      console.log(`⬆️  New version v${latestTag} available!`);
+      const asset = info.assets.find(a => a.name.endsWith('.exe'));
+      if (!asset) throw new Error('No installer asset found');
+      const tmp = path.join(os.tmpdir(), asset.name);
+      console.log('[Update] Downloading installer…');
+      await downloadFile(asset.browser_download_url, tmp);
+      console.log('[Update] Launching installer…');
+      spawn(tmp, ['/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART'], { detached: true, stdio: 'ignore' }).unref();
+      process.exit(0);
+    } else {
+      console.log('[Update] Already on latest version.');
+    }
+  } catch (e) {
+    console.warn('[Update] Update check failed:', e.message);
+  }
+}
+
 ;(async () => {
-  // ─── 0) Auto-update check ───────────────────────────────────────────────
   await checkForUpdates();
 
-  // ─── 1) Locate bundled yt-dlp & ffmpeg ─────────────────────────────────
-  const exeDir     = path.dirname(process.execPath);
-  const ytdlpPath  = path.join(exeDir, 'yt-dlp.exe');
+  const exeDir    = path.dirname(process.execPath);
+  const ytdlpPath = path.join(exeDir, 'yt-dlp.exe');
   if (!fs.existsSync(ytdlpPath)) {
-    console.error(`❌ Missing yt-dlp.exe in ${exeDir}`); return waitForKeypress();
+    console.error(`❌ yt-dlp.exe not found in ${exeDir}`);
+    return waitForKeypress();
   }
-  const ffFolder   = path.join(exeDir, 'ffmpeg-6.0-essentials_build');
-  const ffCands    = [path.join(ffFolder,'bin','ffmpeg.exe'), path.join(ffFolder,'ffmpeg.exe')];
-  const ffmpegLoc  = ffCands.find(p => fs.existsSync(p)) && path.dirname(ffCands.find(p => fs.existsSync(p)));
+
+  const ffFolder  = path.join(exeDir, 'ffmpeg-6.0-essentials_build');
+  const ffCands   = [path.join(ffFolder, 'bin', 'ffmpeg.exe'), path.join(ffFolder, 'ffmpeg.exe')];
+  const found     = ffCands.find(p => fs.existsSync(p));
+  const ffmpegLoc = found && path.dirname(found);
   if (!ffmpegLoc) {
-    console.error(`❌ Missing ffmpeg.exe under ${ffFolder}`); return waitForKeypress();
+    console.error(`❌ ffmpeg.exe not found under ${ffFolder}`);
+    return waitForKeypress();
   }
 
-  // ─── 2) Prep download folder ────────────────────────────────────────────
-  const downloads = path.join(os.homedir(), 'Downloads');
-  if (!fs.existsSync(downloads)) fs.mkdirSync(downloads, { recursive: true });
+  const downloadDir = path.join(os.homedir(), 'Downloads');
+  if (!fs.existsSync(downloadDir)) fs.mkdirSync(downloadDir, { recursive: true });
 
-  // ─── 3) Prompt user ─────────────────────────────────────────────────────
+  // 1) Prompt for URL & format
   const { url, choice } = await inquirer.prompt([
-    { type:'input', name:'url', message:'Enter YouTube URL:', validate:i=>/^https?:\/\/(www\.)?youtube\.com/.test(i)||'Invalid URL' },
-    { type:'list',  name:'choice', message:'Download:', choices:[
-      {name:'Video+Audio (MP4)', value:'v+a'},
-      {name:'Audio only',        value:'audio'}
-    ]}
+    { type: 'input', name: 'url', message: 'YouTube video URL:', validate: v => /^https?:\/\/(www\.)?youtube\.com/.test(v) || 'Invalid URL' },
+    { type: 'list',  name: 'choice', message: 'Format:', choices: [
+        { name: 'Video + Audio (MP4, highest-quality H.264)', value: 'v+a' },
+        { name: 'Audio only',                         value: 'audio' }
+      ] }
   ]);
 
-  // ─── 4) Build & spawn yt-dlp ────────────────────────────────────────────
-  let fmt, mergeArgs = [];
-  if (choice==='v+a') {
-    fmt = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]';
-    mergeArgs = ['--merge-output-format','mp4'];
-  } else {
-    fmt = 'bestaudio[ext=m4a]/bestaudio';
+  // 2) Force highest-quality MP4‐wrapped H.264 + best M4A, with an MP4 fallback,
+  //    then remux into a single .mp4 container.
+  const fmt = choice === 'v+a'
+    ? 'bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/best[ext=mp4]'
+    : 'bestaudio[ext=m4a]';
+  const mergeArgs = [];
+  if (choice === 'v+a') {
+    mergeArgs.push('--merge-output-format','mp4');
+    // ensure proper mp4 container even on fallback
+    mergeArgs.push('--remux-video','mp4');
   }
 
   const args = [
-    '--restrict-filenames',
+    '--no-mtime', '--restrict-filenames',
     '-f', fmt,
     ...mergeArgs,
     '--ffmpeg-location', ffmpegLoc,
-    '-o', path.join(downloads, '%(title)s.%(ext)s'),
+    '-o', path.join(downloadDir, '%(title)s.%(ext)s'),
     url
   ];
 
-  console.log(`\nRunning: yt-dlp.exe ${args.join(' ')}\n`);
-  const dl = spawn(ytdlpPath, args, { stdio:'inherit' });
-
-  dl.on('error', e => { console.error('❌ Failed to start yt-dlp.exe:', e); waitForKeypress(); });
+  // 3) Run yt-dlp
+  console.log(`\n[Download] Running:\nyt-dlp.exe ${args.join(' ')}`);
+  const dl = spawn(ytdlpPath, args, { stdio: 'inherit' });
+  dl.on('error', e => {
+    console.error('[Download] yt-dlp failed to start:', e);
+    waitForKeypress();
+  });
   dl.on('close', code => {
-    console.log(code===0 ? '\n✅ Download complete!' : `\n❌ yt-dlp exited ${code}`);
-    spawn('explorer',[downloads],{shell:true});
+    console.log(code === 0 ? '\n✅ Download complete!' : `\n❌ yt-dlp exited with code ${code}`);
+    spawn('explorer', [downloadDir], { shell: true });
     waitForKeypress();
   });
 })();
