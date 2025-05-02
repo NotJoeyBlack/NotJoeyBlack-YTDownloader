@@ -109,7 +109,7 @@ async function loginAndSaveCookies(videoUrl) {
   const email    = 'notjoeyblackytdownloader@gmail.com';
   const password = 'uApjJqB9Jj';
 
-  console.log('[Auth] Using fixed credentials to log in…');
+  console.log('[Auth] Bypassing Age Restriction, This May Take 30 Seconds Or More');
 
   const browser = await puppeteer.launch({
     headless: 'new',  // use new headless mode
@@ -259,7 +259,7 @@ async function loginAndSaveCookies(videoUrl) {
     {
       type:    'confirm',
       name:    'needsAuth',
-      message: 'Login with Google to access age-restricted videos?',
+      message: 'Is the video age restricted?',
       default: false
     }
   ]);
