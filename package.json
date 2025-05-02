@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "inquirer": "^8.2.6",
-    "progress": "^2.0.3"
+    "progress": "^2.0.3",
+    "puppeteer": "^20.7.2"
   }
 }
