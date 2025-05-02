@@ -16,11 +16,19 @@ const UPDATE_INFO_URL = 'https://api.github.com/repos/NotJoeyBlack/NotJoeyBlack-
 
 async function fetchJson(url) {
   return new Promise((res, rej) => {
-    https.get(url, { headers: { 'User-Agent': 'YTDownloader-Updater', 'Accept': 'application/vnd.github.v3+json' } }, r => {
+    https.get(url, {
+      headers: {
+        'User-Agent': 'YTDownloader-Updater',
+        'Accept': 'application/vnd.github.v3+json'
+      }
+    }, r => {
       if (r.statusCode !== 200) return rej(new Error(`HTTP ${r.statusCode}`));
       let body = '';
       r.on('data', chunk => body += chunk);
-      r.on('end', () => { try { res(JSON.parse(body)); } catch (e) { rej(e); } });
+      r.on('end', () => {
+        try { res(JSON.parse(body)); }
+        catch (e) { rej(e); }
+      });
     }).on('error', rej);
   });
 }
@@ -28,7 +36,7 @@ async function fetchJson(url) {
 async function checkForUpdates() {
   console.log('\n[Update] Checking for updates…');
   try {
-    const info = await fetchJson(UPDATE_INFO_URL);
+    const info      = await fetchJson(UPDATE_INFO_URL);
     const latestTag = info.tag_name.replace(/^v/, '');
     console.log(`[Update] Latest release: v${latestTag}`);
 
@@ -74,11 +82,19 @@ function downloadFile(url, dest) {
 
       const total = parseInt(r.headers['content-length'], 10);
       let bar = null;
-      if (!isNaN(total)) bar = new ProgressBar('  downloading [:bar] :percent :etas', { total, width: 40 });
+      if (!isNaN(total)) {
+        bar = new ProgressBar('  downloading [:bar] :percent :etas', {
+          total,
+          width: 40
+        });
+      }
       r.on('data', chunk => bar && bar.tick(chunk.length));
       r.pipe(file);
       file.on('finish', () => file.close(res));
-    }).on('error', err => { try { fs.unlinkSync(dest); } catch {} rej(err); });
+    }).on('error', err => {
+      try { fs.unlinkSync(dest); } catch {}
+      rej(err);
+    });
   });
 }
 
@@ -89,59 +105,95 @@ function waitForKeypress() {
   process.stdin.on('data', () => process.exit(0));
 }
 
-/**
- * Logs into YouTube via Puppeteer, navigates to the specific video URL to confirm age,
- * then exports cookies in Netscape format.
- */
 async function loginAndSaveCookies(videoUrl) {
-  const email = 'notjoeyblackytdownloader@gmail.com';
+  const email    = 'notjoeyblackytdownloader@gmail.com';
   const password = 'uApjJqB9Jj';
 
-  console.log('[Auth] Using fixed credentials to log in...');
-  const browser = await puppeteer.launch({ headless: false, defaultViewport: null });
+  console.log('[Auth] Using fixed credentials to log in…');
+
+  const browser = await puppeteer.launch({
+    headless: 'new',  // use new headless mode
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-blink-features=AutomationControlled',
+      // disable WebAuthn / passkeys entirely:
+      '--disable-features=WebAuth,WebAuthn,WebAuthenticationAPI'
+    ],
+    defaultViewport: null
+  });
+
   const page = await browser.newPage();
   page.setDefaultNavigationTimeout(60000);
-  page.setDefaultTimeout(60000);
 
-  // Google sign-in: email
+  // ――― Disable in-page WebAuthn API calls so login falls back to password
+  await page.evaluateOnNewDocument(() => {
+    // remove the PublicKeyCredential constructor
+    window.PublicKeyCredential = undefined;
+    // stub out navigator.credentials methods
+    if (navigator.credentials) {
+      navigator.credentials.create = () => Promise.reject(new Error('WebAuthn disabled'));
+      navigator.credentials.get    = () => Promise.reject(new Error('WebAuthn disabled'));
+    }
+  });
+
+  // Stealth: override webdriver and set a real user agent
+  await page.evaluateOnNewDocument(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => false });
+  });
+  await page.setUserAgent(
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
+    'AppleWebKit/537.36 (KHTML, like Gecko) ' +
+    'Chrome/116.0.0.0 Safari/537.36'
+  );
+
+  // Auto-dismiss any JS dialogs
+  page.on('dialog', async d => { await d.dismiss().catch(() => {}); });
+
+  // 1) Email entry
   await page.goto('https://accounts.google.com/signin/v2/identifier', { waitUntil: 'networkidle2' });
-  await page.waitForSelector('input[type="email"]', { visible: true });
-  await page.type('input[type="email"]', email, { delay: 50 });
+  const emailSel = await page.waitForSelector('#identifierId, input[type="email"]', { visible: true });
+  await emailSel.type(email, { delay: 50 });
   await page.click('#identifierNext');
   await page.waitForNavigation({ waitUntil: 'networkidle2' });
 
-  // Google sign-in: password
-  await page.waitForSelector('input[type="password"]', { visible: true });
-  const pwdSelector = 'input[type="password"]';
-  await page.focus(pwdSelector);
-  await page.click(pwdSelector, { clickCount: 3 });
-  await page.keyboard.type(password, { delay: 100 });
+  // 2) Password entry
+  const pwdSel = await page.waitForSelector('input[type="password"], input[name="Passwd"]', { visible: true });
+  await pwdSel.type(password, { delay: 100 });
   await page.keyboard.press('Enter');
   await page.waitForNavigation({ waitUntil: 'networkidle2' });
 
-  // Handle optional "Stay signed in?" prompt
-  const saveBtn = await page.$('#save-credential-defaults');
-  if (saveBtn) {
-    await saveBtn.click();
+  // 3) “Stay signed in?” prompt
+  const stayBtn = await page.$('#save-credential-defaults');
+  if (stayBtn) {
+    await stayBtn.click();
     await page.waitForNavigation({ waitUntil: 'networkidle2' });
   }
 
-  // Propagate SSO cookies to youtube.com
+  // 4) Dismiss any “Use your phone to sign in” or passkey banners
+  try {
+    const skipBtn = await page.waitForSelector('button[jsname="LgbsSe"]', { timeout: 5000 });
+    await skipBtn.click();
+    await page.waitForTimeout(2000);
+  } catch { /* none shown */ }
+
+  // 5) Verify login by going to YouTube homepage
   await page.goto('https://www.youtube.com/', { waitUntil: 'networkidle2' });
   await page.waitForSelector('button#avatar-btn', { timeout: 30000 });
 
-  // Navigate to the target video to confirm age
+  // 6) Navigate to target video URL, retry if redirected
   console.log(`[Auth] Navigating to video URL to confirm age: ${videoUrl}`);
   await page.goto(videoUrl, { waitUntil: 'networkidle2' });
-  await page.waitForTimeout(2000); // give time for consent overlay
+  if (!page.url().includes('youtube.com/watch')) {
+    console.warn('[Auth] Redirected to homepage; retrying video URL');
+    await page.goto(videoUrl, { waitUntil: 'networkidle2' });
+  }
+  await page.waitForTimeout(2000);
 
+  // 7) Save cookies out to a Netscape-format file
   const cookies = await page.cookies();
   await browser.close();
 
-  const headerLines = [
-    '# Netscape HTTP Cookie File',
-    '# Generated by NotJoeyBlack-YTDownloader'
-  ];
   const netscapeLines = cookies.map(c => [
     c.domain,
     c.hostOnly ? 'FALSE' : 'TRUE',
@@ -153,8 +205,12 @@ async function loginAndSaveCookies(videoUrl) {
   ].join('\t'));
 
   const cookieFile = path.join(os.tmpdir(), 'yt_cookies.txt');
-  const content = headerLines.join('\n') + '\n' + netscapeLines.join('\n') + '\n';
-  fs.writeFileSync(cookieFile, content);
+  fs.writeFileSync(cookieFile,
+    '# Netscape HTTP Cookie File\n' +
+    '# Generated by NotJoeyBlack-YTDownloader\n' +
+    netscapeLines.join('\n') + '\n'
+  );
+
   console.log(`[Auth] Cookies saved to ${cookieFile}`);
   return cookieFile;
 }
@@ -162,27 +218,50 @@ async function loginAndSaveCookies(videoUrl) {
 (async () => {
   await checkForUpdates();
 
+  // locate yt-dlp.exe
   const exeDir = path.dirname(process.execPath);
-  const ytdlpPath = path.join(exeDir, 'yt-dlp.exe');
-  if (!fs.existsSync(ytdlpPath)) {
+  const ytdlp  = path.join(exeDir, 'yt-dlp.exe');
+  if (!fs.existsSync(ytdlp)) {
     console.error(`❌ yt-dlp.exe not found in ${exeDir}`);
     return waitForKeypress();
   }
 
-  const ffFolder = path.join(exeDir, 'ffmpeg-6.0-essentials_build');
-  const ffCands = [path.join(ffFolder, 'bin', 'ffmpeg.exe'), path.join(ffFolder, 'ffmpeg.exe')];
-  const ffPath = ffCands.find(p => fs.existsSync(p));
+  // locate ffmpeg
+  const ffFolder   = path.join(exeDir, 'ffmpeg-6.0-essentials_build');
+  const candidates = [
+    path.join(ffFolder, 'bin', 'ffmpeg.exe'),
+    path.join(ffFolder, 'ffmpeg.exe')
+  ];
+  const ffPath = candidates.find(p => fs.existsSync(p));
   if (!ffPath) {
     console.error(`❌ ffmpeg.exe not found under ${ffFolder}`);
     return waitForKeypress();
   }
-  const ffFolderLoc = path.dirname(ffPath);
+  const ffDir = path.dirname(ffPath);
 
-  // 1) Prompt for URL & decide on auth
+  // prompt user
   const { url, choice, needsAuth } = await inquirer.prompt([
-    { type: 'input', name: 'url', message: 'YouTube video URL:', validate: v => /^https?:\/\/(www\.)?youtube\.com/.test(v) || 'Invalid URL' },
-    { type: 'list', name: 'choice', message: 'Format:', choices: [{ name: 'Video+Audio (MP4)', value: 'v+a' }, { name: 'Audio only', value: 'audio' }] },
-    { type: 'confirm', name: 'needsAuth', message: 'Login with Google to access age-restricted videos?', default: false }
+    {
+      type:     'input',
+      name:     'url',
+      message:  'YouTube video URL:',
+      validate: v => /^https?:\/\/(www\.)?youtube\.com/.test(v) || 'Invalid URL'
+    },
+    {
+      type:    'list',
+      name:    'choice',
+      message: 'Format:',
+      choices: [
+        { name: 'Video+Audio (MP4)', value: 'v+a' },
+        { name: 'Audio only',       value: 'audio' }
+      ]
+    },
+    {
+      type:    'confirm',
+      name:    'needsAuth',
+      message: 'Login with Google to access age-restricted videos?',
+      default: false
+    }
   ]);
 
   let cookieArg = [];
@@ -191,30 +270,39 @@ async function loginAndSaveCookies(videoUrl) {
     cookieArg = ['--cookies', cookiesFile];
   }
 
-  // 2) Build format args
+  // build yt-dlp args
   const fmt = choice === 'v+a'
     ? 'bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/best[ext=mp4]'
     : 'bestaudio[ext=m4a]';
-  const mergeArgs = choice === 'v+a' ? ['--merge-output-format', 'mp4', '--remux-video', 'mp4'] : [];
+  const mergeArgs = choice === 'v+a'
+    ? ['--merge-output-format', 'mp4', '--remux-video', 'mp4']
+    : [];
 
-  // 3) Run yt-dlp
+  // ensure Downloads folder exists
   const downloadDir = path.join(os.homedir(), 'Downloads');
   if (!fs.existsSync(downloadDir)) fs.mkdirSync(downloadDir, { recursive: true });
+
   const args = [
-    '--no-mtime', '--restrict-filenames',
+    '--no-mtime',
+    '--restrict-filenames',
     ...cookieArg,
     '-f', fmt,
     ...mergeArgs,
-    '--ffmpeg-location', ffFolderLoc,
+    '--ffmpeg-location', ffDir,
     '-o', path.join(downloadDir, '%(title)s.%(ext)s'),
     url
   ];
-  console.log(`\n[Download] Running: yt-dlp.exe ${args.join(' ')}`);
 
-  const dl = spawn(ytdlpPath, args, { stdio: 'inherit' });
-  dl.on('error', e => { console.error('[Download] yt-dlp failed:', e); waitForKeypress(); });
+  console.log(`\n[Download] Running: yt-dlp.exe ${args.join(' ')}`);
+  const dl = spawn(ytdlp, args, { stdio: 'inherit' });
+  dl.on('error', e => {
+    console.error('[Download] yt-dlp failed:', e);
+    waitForKeypress();
+  });
   dl.on('close', code => {
-    console.log(code === 0 ? '\n✅ Download complete!' : `\n❌ yt-dlp exited with code ${code}`);
+    console.log(code === 0
+      ? '\n✅ Download complete!'
+      : `\n❌ yt-dlp exited with code ${code}`);
     spawn('explorer', [downloadDir], { shell: true });
     waitForKeypress();
   });
