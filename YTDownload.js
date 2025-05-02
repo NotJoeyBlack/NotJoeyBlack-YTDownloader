@@ -11,7 +11,7 @@ const ProgressBar = require('progress');
 const { spawn }   = require('child_process');
 const puppeteer   = require('puppeteer');
 
-const CURRENT_VERSION = '1.6.0';
+const CURRENT_VERSION = '1.7.0';
 const UPDATE_INFO_URL = 'https://api.github.com/repos/NotJoeyBlack/NotJoeyBlack-YTDownloader/releases/latest';
 
 async function fetchJson(url) {
