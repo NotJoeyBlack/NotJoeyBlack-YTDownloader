@@ -1,11 +1,11 @@
 ; -- YTDownloader.iss --
 [Setup]
 AppName=YT Downloader
-AppVersion=1.6.0
+AppVersion=1.7.0
 DefaultDirName={pf}\YT Downloader
 DefaultGroupName=YT Downloader
 OutputDir=.
-OutputBaseFilename=YTDownloaderSetup
+OutputBaseFilename=NotJoeyBlackYTDownloaderSetup
 Compression=lzma
 SolidCompression=yes
 
